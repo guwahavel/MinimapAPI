@@ -284,7 +284,7 @@ local function niceJourney_PostRender()
     end
 
     local pressed = Input.IsMouseBtnPressed(Mouse.MOUSE_BUTTON_LEFT) or
-        Input.IsActionPressed(ButtonAction.ACTION_MENUCONFIRM, 0)
+        Input.IsActionPressed(ButtonAction.ACTION_MENUCONFIRM, playerController)
     if pressed and not WasTriggered and teleportTarget
         and teleportTarget ~= 'current' then
         WasTriggered = true
@@ -300,13 +300,11 @@ MinimapAPI:AddCallbackFunc(
     CALLBACK_PRIORITY,
     function(_)
         if tabPressTimeStart > 1000 and not controlsDisabled and cursorMovedWithKeyboard then
-            print("yes")
             Isaac.GetPlayer(0).ControlsEnabled = false
             controlsDisabled = true
         elseif tabPressTimeStart == 0 and controlsDisabled then
             Isaac.GetPlayer(0).ControlsEnabled = true
             controlsDisabled = false
-            print("no")
         end
     end
 )
