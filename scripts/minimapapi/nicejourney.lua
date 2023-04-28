@@ -208,8 +208,8 @@ local function HandleMoveCursorWithButtons()
             posToCheck = { 4, 8 }
         end
 
-        cursorMovedWithKeyboard = posToCheck
         if posToCheck then
+            cursorMovedWithKeyboard = true
             local doorPositions = MinimapAPI.RoomShapeDoorCoords[currentlyHighlighted.Shape]
             for _, possiblePos in ipairs(posToCheck) do
                 if doorPositions[possiblePos] then
@@ -284,7 +284,8 @@ local function niceJourney_PostRender()
     end
 
     local pressed = Input.IsMouseBtnPressed(Mouse.MOUSE_BUTTON_LEFT) or
-        Input.IsActionPressed(ButtonAction.ACTION_MENUCONFIRM, playerController)
+        Input.IsButtonTriggered(MinimapAPI.Config.TeleportConfirmKey, 0) or
+        Input.IsButtonTriggered(MinimapAPI.Config.TeleportConfirmButton, playerController)
     if pressed and not WasTriggered and teleportTarget
         and teleportTarget ~= 'current' then
         WasTriggered = true
@@ -299,11 +300,17 @@ MinimapAPI:AddCallbackFunc(
     ModCallbacks.MC_POST_UPDATE,
     CALLBACK_PRIORITY,
     function(_)
-        if tabPressTimeStart > 1000 and not controlsDisabled and cursorMovedWithKeyboard then
+        if tabPressTimeStart > 1000 and not controlsDisabled and cursorMovedWithKeyboard and MinimapAPI:GetConfig("MouseTeleportDisableMovement") then
             Isaac.GetPlayer(0).ControlsEnabled = false
+            if MinimapAPI.isRepentance and Isaac.GetPlayer(0):GetOtherTwin() then
+                Isaac.GetPlayer(0):GetOtherTwin().ControlsEnabled = false
+            end
             controlsDisabled = true
         elseif tabPressTimeStart == 0 and controlsDisabled then
             Isaac.GetPlayer(0).ControlsEnabled = true
+            if MinimapAPI.isRepentance and Isaac.GetPlayer(0):GetOtherTwin() then
+                Isaac.GetPlayer(0):GetOtherTwin().ControlsEnabled = true
+            end
             controlsDisabled = false
         end
     end
