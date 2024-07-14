@@ -1,6 +1,7 @@
 local MinimapAPI = require("scripts.minimapapi")
 local cache = require("scripts.minimapapi.cache")
 local constants = require("scripts.minimapapi.constants")
+local Callbacks = require("scripts.minimapapi.callbacks")
 local CALLBACK_PRIORITY = constants.CALLBACK_PRIORITY
 require("scripts.minimapapi.apioverride")
 
@@ -164,7 +165,6 @@ end
 local badload = false
 local font = Font()
 font:Load("font/pftempestasevencondensed.fnt")
-local rooms
 local playerMapPos = vectorZero
 ---@type table<any, MinimapAPI.Room[]>
 MinimapAPI.Levels = {}
@@ -227,13 +227,12 @@ MinimapAPI.SpriteMinimapCustomLarge:Load("gfx/ui/minimapapi/custom_minimap2.anm2
 ------ Override original API -------
 if MinimapAPI.isRepentance then
 	local MakeRedRoomDoor_Old = getmetatable(Level).__class.MakeRedRoomDoor
-	APIOverride.OverrideClassFunction(Level, "MakeRedRoomDoor", function(self,currentRoomIdx, slot)
+	APIOverride.OverrideClassFunction(Level, "MakeRedRoomDoor", function(self, currentRoomIdx, slot)
 		local returnVal = MakeRedRoomDoor_Old(self, currentRoomIdx, slot)
 		MinimapAPI:CheckForNewRedRooms()
 		return returnVal
 	end)
 end
-
 
 MinimapAPI.OverrideConfig = {}
 function MinimapAPI:GetConfig(option)
@@ -539,13 +538,21 @@ function MinimapAPI:GetCurrentRoomGridIDs()
 end
 
 function MinimapAPI:RunPlayerPosCallbacks()
+	local currentRoom = MinimapAPI:GetCurrentRoom()
+	local returnVal = Isaac.RunCallback(Callbacks.PLAYER_POS_CHANGED, currentRoom, playerMapPos)
+	if returnVal then
+		playerMapPos = returnVal
+		return returnVal
+	end
+
+	-- still run old callbacks for backwards compatibility
 	for _, v in ipairs(callbacks_playerpos) do
 		local s, ret
 		-- backwards compatibility mode, pass mod reference
 		if v.modReference then
-			s, ret = pcall(v.call, v.modReference, MinimapAPI:GetCurrentRoom(), playerMapPos)
+			s, ret = pcall(v.call, v.modReference, currentRoom, playerMapPos)
 		else
-			s, ret = pcall(v.call, MinimapAPI:GetCurrentRoom(), playerMapPos)
+			s, ret = pcall(v.call, currentRoom, playerMapPos)
 		end
 		if s then
 			if ret then
@@ -559,6 +566,12 @@ function MinimapAPI:RunPlayerPosCallbacks()
 end
 
 function MinimapAPI:RunDisplayFlagsCallbacks(room, df)
+	local returnVal = Isaac.RunCallback(Callbacks.GET_DISPLAY_FLAGS, room, df)
+	if returnVal then
+		return returnVal
+	end
+
+	-- still run old callbacks for backwards compatibility
 	for _, v in ipairs(callbacks_displayflags) do
 		local s, ret
 		-- backwards compatibility mode, pass mod reference
@@ -580,6 +593,13 @@ function MinimapAPI:RunDisplayFlagsCallbacks(room, df)
 end
 
 function MinimapAPI:RunDimensionCallbacks()
+	local returnVal = Isaac.RunCallback(Callbacks.GET_DIMENSION, MinimapAPI.CurrentDimension)
+	if returnVal then
+		MinimapAPI.CurrentDimension = returnVal
+		return returnVal
+	end
+
+	-- still run old callbacks for backwards compatibility
 	for _, v in ipairs(callbacks_dimension) do
 		local s, ret
 		-- backwards compatibility mode, pass mod reference
@@ -638,9 +658,14 @@ local function GetRoomDescAndDimFromListIndex(listIndex)
 	end
 end
 
+local function IsAltPath()
+	local level = game:GetLevel()
+	return ((level:GetStageType() == StageType.STAGETYPE_REPENTANCE or level:GetStageType() == StageType.STAGETYPE_REPENTANCE_B) or (StageAPI and StageAPI.Loaded and StageAPI.GetCurrentStage() and StageAPI.GetCurrentStage().LevelgenStage and (StageAPI.GetCurrentStage().LevelgenStage.StageType == StageType.STAGETYPE_REPENTANCE or StageAPI.GetCurrentStage().LevelgenStage.StageType == StageType.STAGETYPE_REPENTANCE_B)))
+end
+
 function MinimapAPI:LoadDefaultMap(dimension)
 	local level = game:GetLevel()
-	rooms = level:GetRooms()
+	local rooms = level:GetRooms()
 	dimension = dimension or MinimapAPI.CurrentDimension
 	MinimapAPI.Levels[dimension] = {}
 	MinimapAPI.CheckedRoomCount = 0
@@ -678,9 +703,10 @@ function MinimapAPI:LoadDefaultMap(dimension)
 				end
 
 				if roomDescriptor.Data.Type == RoomType.ROOM_DEFAULT then
-					if level:GetStageType() == StageType.STAGETYPE_REPENTANCE or level:GetStageType() == StageType.STAGETYPE_REPENTANCE_B then
+					local currentStage = StageAPI and StageAPI.Loaded and StageAPI.GetCurrentStage()
+					if IsAltPath() then
 						local isCurseLabyrinth = level:GetCurses() & LevelCurse.CURSE_OF_LABYRINTH == LevelCurse.CURSE_OF_LABYRINTH
-						if (level:GetAbsoluteStage() == LevelStage.STAGE1_2 and not isCurseLabyrinth or level:GetAbsoluteStage() == LevelStage.STAGE1_1 and isCurseLabyrinth) and roomDescriptor.Data.Subtype == 34 then
+						if ((level:GetAbsoluteStage() == LevelStage.STAGE1_2 and not isCurseLabyrinth or level:GetAbsoluteStage() == LevelStage.STAGE1_1 and isCurseLabyrinth) or (StageAPI and StageAPI.Loaded and StageAPI.GetCurrentStage() and StageAPI.GetCurrentStage():HasMirrorDimension())) and roomDescriptor.Data.Subtype == 34 then
 							t.VisitedIcons = { "MirrorRoom" }
 						end
 
@@ -790,15 +816,16 @@ function MinimapAPI:CurrentRoomContainsGridEntity(gridEntityDef)
 end
 
 function MinimapAPI:EffectCrystalBall()
-	for _,v in ipairs(MinimapAPI:GetLevel()) do
-		if v.Type ~= RoomType.ROOM_SUPERSECRET then
-			v:Reveal()
+	for _,room in ipairs(MinimapAPI:GetLevel()) do
+		if room.Type ~= RoomType.ROOM_SUPERSECRET and room.Type ~= RoomType.ROOM_ULTRASECRET then
+			room:Reveal()
 		end
 	end
 end
 
 function MinimapAPI:CheckForNewRedRooms(dimension)
-	rooms = game:GetLevel():GetRooms()
+	local level = game:GetLevel()
+	local rooms = level:GetRooms()
 	dimension = dimension or MinimapAPI.CurrentDimension
 	local added_descriptors = {}
 	for i = MinimapAPI.CheckedRoomCount, #rooms - 1 do
@@ -833,12 +860,14 @@ function MinimapAPI:CheckForNewRedRooms(dimension)
 				end
 
 				if roomDescriptor.Data.Type == RoomType.ROOM_DEFAULT then
-					if (game:GetLevel():GetAbsoluteStage() == LevelStage.STAGE1_2 and (game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE or game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE_B)) and roomDescriptor.Data.Subtype == 34 then
-						t.VisitedIcons = { "MirrorRoom" }
-					end
+					if IsAltPath() then
+						if ((level:GetAbsoluteStage() == LevelStage.STAGE1_2 and not isCurseLabyrinth or level:GetAbsoluteStage() == LevelStage.STAGE1_1 and isCurseLabyrinth) or (StageAPI and StageAPI.Loaded and StageAPI.GetCurrentStage() and StageAPI.GetCurrentStage():HasMirrorDimension())) and roomDescriptor.Data.Subtype == 34 then
+							t.VisitedIcons = { "MirrorRoom" }
+						end
 
-					if (game:GetLevel():GetAbsoluteStage() == LevelStage.STAGE2_2 and (game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE or game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE_B)) and roomDescriptor.Data.Subtype == 10 then
-						t.VisitedIcons = { "MinecartRoom" }
+						if (level:GetAbsoluteStage() == LevelStage.STAGE2_2 and not isCurseLabyrinth or level:GetAbsoluteStage() == LevelStage.STAGE2_1 and isCurseLabyrinth) and roomDescriptor.Data.Subtype == 10 then
+							t.VisitedIcons = { "MinecartRoom" }
+						end
 					end
 				end
 			end
@@ -1016,6 +1045,7 @@ function maproomfunctions:Reveal()
 end
 
 function maproomfunctions:UpdateType()
+	local level = game:GetLevel()
 	if self.Descriptor and self.Descriptor.Data and not self.NoUpdate then
 		self.Type = self.Descriptor.Data.Type
 		self.PermanentIcons = { MinimapAPI:GetRoomTypeIconID(self.Type) }
@@ -1028,12 +1058,14 @@ function maproomfunctions:UpdateType()
 				self.PermanentIcons = { "TreasureRoomRed" }
 			end
 			if self.Descriptor.Data.Type == RoomType.ROOM_DEFAULT then
-				if (game:GetLevel():GetAbsoluteStage() == LevelStage.STAGE1_2 and (game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE or game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE_B)) and self.Descriptor.Data.Subtype == 34 then
-					self.VisitedIcons = { "MirrorRoom" }
-				end
+				if IsAltPath() then
+					if ((level:GetAbsoluteStage() == LevelStage.STAGE1_2 and not isCurseLabyrinth or level:GetAbsoluteStage() == LevelStage.STAGE1_1 and isCurseLabyrinth) or (StageAPI and StageAPI.Loaded and StageAPI.GetCurrentStage() and StageAPI.GetCurrentStage():HasMirrorDimension())) and self.Descriptor.Data.Subtype == 34 then
+						self.VisitedIcons = { "MirrorRoom" }
+					end
 
-				if (game:GetLevel():GetAbsoluteStage() == LevelStage.STAGE2_2 and (game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE or game:GetLevel():GetStageType() == StageType.STAGETYPE_REPENTANCE_B)) and self.Descriptor.Data.Subtype == 10 then
-					self.VisitedIcons = { "MinecartRoom" }
+					if (level:GetAbsoluteStage() == LevelStage.STAGE2_2 and not isCurseLabyrinth or level:GetAbsoluteStage() == LevelStage.STAGE2_1 and isCurseLabyrinth) and roomDescriptor.Data.Subtype == 10 then
+						self.VisitedIcons = { "MinecartRoom" }
+					end
 				end
 			end
 		end
@@ -1277,11 +1309,13 @@ function MinimapAPI:IsModTable(modtable)
 end
 
 -- Callbacks
+-- it's recommended to use the vanilla callback system, old functions are kept as follows for backwards compatibility
 -- try to handle both using a mod table as key
 -- for backwards compatibility, and using a string
 
 -- Use of a string as key or something else that doesn't change between
 -- mod reloads is recommended
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:AddPlayerPositionCallback(modkey, func)
 	local modtable
 
@@ -1299,6 +1333,7 @@ end
 
 -- Use of a string as key or something else that doesn't change between
 -- mod reloads is recommended
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:AddDisplayFlagsCallback(modkey, func)
 	local modtable
 
@@ -1316,6 +1351,7 @@ end
 
 -- Use of a string as key or something else that doesn't change between
 -- mod reloads is recommended
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:AddDimensionCallback(modkey, func)
 	local modtable
 
@@ -1331,6 +1367,7 @@ function MinimapAPI:AddDimensionCallback(modkey, func)
 	}
 end
 
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:RemoveAllCallbacks(modkey)
 	MinimapAPI:RemovePlayerPositionCallbacks(modkey)
 	MinimapAPI:RemoveDisplayFlagsCallbacks(modkey)
@@ -1354,19 +1391,22 @@ local function RemoveFromCallbackTable(tbl, modkey)
 	end
 end
 
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:RemovePlayerPositionCallbacks(modkey)
 	RemoveFromCallbackTable(callbacks_playerpos, modkey)
 end
 
----@deprecated
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:RemovePlayerPositionCallback(modkey)
 	MinimapAPI:RemovePlayerPositionCallbacks(modkey)
 end
 
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:RemoveDisplayFlagsCallbacks(modkey)
 	RemoveFromCallbackTable(callbacks_displayflags, modkey)
 end
 
+---@deprecated Use vanilla callbacks as defined in callbacks.lua
 function MinimapAPI:RemoveDimensionCallbacks(modkey)
 	RemoveFromCallbackTable(callbacks_dimension, modkey)
 end
@@ -1434,8 +1474,10 @@ MinimapAPI:AddCallbackFunc(ModCallbacks.MC_USE_ITEM, CALLBACK_PRIORITY, function
 	elseif MinimapAPI.isRepentance and colltype == CollectibleType.COLLECTIBLE_RED_KEY then
 		MinimapAPI:CheckForNewRedRooms()
 	elseif colltype == CollectibleType.COLLECTIBLE_DADS_KEY then
-		for _,room in ipairs(MinimapAPI:GetCurrentRoom():GetAdjacentRooms()) do
-			room:SetDisplayFlags(5)
+		if MinimapAPI:GetCurrentRoom() then
+			for _,room in ipairs(MinimapAPI:GetCurrentRoom():GetAdjacentRooms()) do
+				room:SetDisplayFlags(5)
+			end
 		end
 		MinimapAPI:UpdateExternalMap()
 	elseif colltype == CollectibleType.COLLECTIBLE_GLOWING_HOUR_GLASS then
@@ -2095,7 +2137,6 @@ function MinimapAPI:renderRoomShadows(useCutOff)
 	local renderRoomSize = not MinimapAPI:IsLarge() and roomSize or largeRoomSize
 	local screen_size = MinimapAPI:GetScreenTopRight()
 	local offsetVec = Vector( screen_size.X - MinimapAPI:GetConfig("MapFrameWidth") - MinimapAPI:GetConfig("PositionX") + outlinePixelSize.X, screen_size.Y + MinimapAPI:GetConfig("PositionY") - outlinePixelSize.Y/2 - 2)
-	
 
 	local sprite = not MinimapAPI:IsLarge() and MinimapAPI.SpriteMinimapSmall or MinimapAPI.SpriteMinimapLarge
 	sprite.Color = defaultOutlineColor
@@ -2165,8 +2206,8 @@ local function renderCallbackFunction(_)
 		if not gameroom:IsClear() then
 			return
 		end
-	end	
-	
+	end
+
 	--Hide during StageAPI reimplemented stage transition
 	if MinimapAPI.UsingPostHUDRender and StageAPI.TransitionAnimationData.State == 2 then
 		return
@@ -2459,9 +2500,11 @@ MinimapAPI:AddCallbackFunc(
 	function(_, is_save)
 		badload = MinimapAPI:IsBadLoad()
 		if addRenderCall then
-			if StageAPI and StageAPI.Loaded then
+			if REPENTOGON then
+				MinimapAPI:AddCallbackFunc(ModCallbacks.MC_POST_HUD_RENDER, CALLBACK_PRIORITY, renderCallbackFunction)
+			elseif StageAPI and StageAPI.Loaded then
 				StageAPI.AddCallback("MinimapAPI", "POST_HUD_RENDER", constants.STAGEAPI_CALLBACK_PRIORITY, renderCallbackFunction)
-				MinimapAPI.UsingPostHUDRender = true
+				MinimapAPI.UsingStageAPIPostHUDRender = true -- only for stage api
 			else
 				MinimapAPI:AddCallbackFunc(ModCallbacks.MC_POST_RENDER, CALLBACK_PRIORITY, renderCallbackFunction)
 			end
